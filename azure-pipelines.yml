@@ -1,13 +1,13 @@
 trigger:
   branches:
     include:
-      - main
+      - master
       - develop
 
 pr:
   branches:
     include:
-      - main
+      - master
 
 variables:
 - group: esprit
@@ -49,6 +49,11 @@ stages:
           MYSQL_PASSWORD: apppassword
 
     steps:
+
+    - checkout: self
+      fetchDepth: 1
+      persistCredentials: true
+      clean: false
 
     - script: |
         export JAVA_HOME=$(JAVA_HOME_PATH)
@@ -138,18 +143,35 @@ stages:
       name: Default
 
     steps:
+    - checkout: none
+
     - download: current
       artifact: drop
 
     - script: |
+        set -e
+        echo "=== Debug credentials ==="
+        echo "Username: $(DOCKERHUB_USERNAME)"
+        echo "Password défini: $( [ -n "$(DOCKERHUB_PASSWORD)" ] && echo 'OUI' || echo 'NON' )"
+        echo "Repo: $(DOCKERHUB_REPO)"
+        echo "Tag: $(IMAGE_TAG)"
+      displayName: 'Debug variables'
+
+    - script: |
+        set -e
+        echo "=== Login Docker Hub ==="
+        echo "$(DOCKERHUB_PASSWORD)" | docker login -u "$(DOCKERHUB_USERNAME)" --password-stdin
+        echo "LOGIN OK"
+      displayName: 'Docker Login'
+
+    - script: |
+        set -e
         cd $(Pipeline.Workspace)/drop
         echo "=== Contenu drop ==="
         ls -la
         echo "=== Build image ==="
         docker build -t $(DOCKERHUB_REPO):$(IMAGE_TAG) -f Dockerfile .
         docker tag $(DOCKERHUB_REPO):$(IMAGE_TAG) $(DOCKERHUB_REPO):latest
-        echo "=== Login Docker Hub ==="
-        echo "$(DOCKERHUB_PASSWORD)" | docker login -u "$(DOCKERHUB_USERNAME)" --password-stdin
         echo "=== Push ==="
         docker push $(DOCKERHUB_REPO):$(IMAGE_TAG)
         docker push $(DOCKERHUB_REPO):latest

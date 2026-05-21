@@ -133,6 +133,7 @@ stages:
       succeeded(),
       or(
         eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        eq(variables['Build.SourceBranch'], 'refs/heads/master'),
         eq(variables['Build.Reason'], 'Manual')
       )
     )
@@ -189,6 +190,7 @@ stages:
       succeeded(),
       or(
         eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        eq(variables['Build.SourceBranch'], 'refs/heads/master'),
         eq(variables['Build.Reason'], 'Manual')
       )
     )

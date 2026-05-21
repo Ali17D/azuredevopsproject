@@ -25,15 +25,11 @@ variables:
   value: '/usr/lib/jvm/java-8-openjdk-amd64/jre'
 
 stages:
-
-# ─────────────────────────────────────────────
-# STAGE 1 — BUILD & TEST
-# ─────────────────────────────────────────────
-- stage: Build
-  displayName: 'Build & Test'
+- stage: BuildAndDeploy
+  displayName: 'Build, Test, Docker & Deploy'
   jobs:
-  - job: BuildAndTest
-    displayName: 'Maven Build + Tests'
+  - job: FullPipeline
+    displayName: 'Full Pipeline'
     pool:
       name: Default
 
@@ -49,11 +45,16 @@ stages:
           MYSQL_PASSWORD: apppassword
 
     steps:
-
     - checkout: self
       fetchDepth: 1
       persistCredentials: true
-      clean: false
+
+    - script: |
+        echo "SourceBranch: $(Build.SourceBranch)"
+        echo "BuildReason: $(Build.Reason)"
+        echo "Username Docker: $(DOCKERHUB_USERNAME)"
+        echo "Password défini: $( [ -n "$(DOCKERHUB_PASSWORD)" ] && echo 'OUI' || echo 'NON' )"
+      displayName: 'Debug variables'
 
     - script: |
         export JAVA_HOME=$(JAVA_HOME_PATH)
@@ -110,125 +111,42 @@ stages:
       displayName: 'Package JAR'
 
     - script: |
-        cp $(Build.SourcesDirectory)/gestion-signalement-main/target/$(APP_NAME).jar $(Build.ArtifactStagingDirectory)/
-        cp $(Build.SourcesDirectory)/gestion-signalement-main/Dockerfile $(Build.ArtifactStagingDirectory)/
-        echo "Fichiers dans staging:"
-        ls -la $(Build.ArtifactStagingDirectory)/
-      displayName: 'Copier JAR + Dockerfile'
-
-    - task: PublishBuildArtifacts@1
-      displayName: 'Publier artifacts'
-      inputs:
-        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
-        ArtifactName: 'drop'
-
-# ─────────────────────────────────────────────
-# STAGE 2 — DOCKER BUILD & PUSH
-# ─────────────────────────────────────────────
-- stage: DockerBuild
-  displayName: 'Docker Build & Push'
-  dependsOn: Build
-  condition: |
-    and(
-      succeeded(),
-      or(
-        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
-        eq(variables['Build.SourceBranch'], 'refs/heads/master'),
-        eq(variables['Build.Reason'], 'Manual')
-      )
-    )
-  jobs:
-  - job: DockerJob
-    displayName: 'Build & Push Docker Hub'
-    pool:
-      name: Default
-
-    steps:
-    - checkout: none
-
-    - download: current
-      artifact: drop
-
-    - script: |
         set -e
-        echo "=== Debug credentials ==="
-        echo "Username: $(DOCKERHUB_USERNAME)"
-        echo "Password défini: $( [ -n "$(DOCKERHUB_PASSWORD)" ] && echo 'OUI' || echo 'NON' )"
-        echo "Repo: $(DOCKERHUB_REPO)"
-        echo "Tag: $(IMAGE_TAG)"
-      displayName: 'Debug variables'
-
-    - script: |
-        set -e
-        echo "=== Login Docker Hub ==="
         echo "$(DOCKERHUB_PASSWORD)" | docker login -u "$(DOCKERHUB_USERNAME)" --password-stdin
         echo "LOGIN OK"
       displayName: 'Docker Login'
 
     - script: |
         set -e
-        cd $(Pipeline.Workspace)/drop
-        echo "=== Contenu drop ==="
-        ls -la
-        echo "=== Build image ==="
+        cd $(Build.SourcesDirectory)/gestion-signalement-main
+        cp target/$(APP_NAME).jar .
         docker build -t $(DOCKERHUB_REPO):$(IMAGE_TAG) -f Dockerfile .
         docker tag $(DOCKERHUB_REPO):$(IMAGE_TAG) $(DOCKERHUB_REPO):latest
-        echo "=== Push ==="
         docker push $(DOCKERHUB_REPO):$(IMAGE_TAG)
         docker push $(DOCKERHUB_REPO):latest
         echo "Image pushée : $(DOCKERHUB_REPO):$(IMAGE_TAG)"
       displayName: 'Build & Push Docker Hub'
 
-# ─────────────────────────────────────────────
-# STAGE 3 — DEPLOY docker-compose local
-# ─────────────────────────────────────────────
-- stage: Deploy
-  displayName: 'Deploy (docker-compose)'
-  dependsOn: DockerBuild
-  condition: |
-    and(
-      succeeded(),
-      or(
-        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
-        eq(variables['Build.SourceBranch'], 'refs/heads/master'),
-        eq(variables['Build.Reason'], 'Manual')
-      )
-    )
-  jobs:
-  - deployment: DeployLocal
-    displayName: 'docker-compose pull + up'
-    pool:
-      name: Default
-    environment: 'production'
-    strategy:
-      runOnce:
-        deploy:
-          steps:
+    - script: |
+        set -e
+        cd $(APP_DIR)
+        docker pull $(DOCKERHUB_REPO):$(IMAGE_TAG)
+        docker tag $(DOCKERHUB_REPO):$(IMAGE_TAG) $(DOCKERHUB_REPO):latest
+        docker-compose up -d --no-deps --pull always app
+        docker image prune -f
+        docker-compose ps
+      displayName: 'Deploy docker-compose'
 
-          - script: |
-              set -e
-              cd $(APP_DIR)
-              echo "=== Pull nouvelle image ==="
-              docker pull $(DOCKERHUB_REPO):$(IMAGE_TAG)
-              docker tag $(DOCKERHUB_REPO):$(IMAGE_TAG) $(DOCKERHUB_REPO):latest
-              echo "=== Restart container app ==="
-              docker-compose up -d --no-deps --pull always app
-              echo "=== Nettoyage ==="
-              docker image prune -f
-              echo "=== Status ==="
-              docker-compose ps
-            displayName: 'Deploy docker-compose'
-
-          - script: |
-              echo "Attente démarrage (30s)..."
-              sleep 30
-              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/aec-api-rest/signalements || echo "000")
-              echo "HTTP Status: $STATUS"
-              if [ "$STATUS" = "200" ]; then
-                echo "Health check OK"
-              else
-                echo "Status $STATUS — logs app:"
-                docker logs gestion-signalement --tail=30
-              fi
-            displayName: 'Health Check'
-            continueOnError: true
+    - script: |
+        echo "Attente démarrage (30s)..."
+        sleep 30
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/aec-api-rest/signalements || echo "000")
+        echo "HTTP Status: $STATUS"
+        if [ "$STATUS" = "200" ]; then
+          echo "Health check OK"
+        else
+          echo "Status $STATUS — logs app:"
+          docker logs gestion-signalement --tail=30
+        fi
+      displayName: 'Health Check'
+      continueOnError: true

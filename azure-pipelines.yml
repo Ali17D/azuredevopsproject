@@ -123,7 +123,14 @@ stages:
 - stage: DockerBuild
   displayName: 'Docker Build & Push'
   dependsOn: Build
-  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  condition: |
+    and(
+      succeeded(),
+      or(
+        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        eq(variables['Build.Reason'], 'Manual')
+      )
+    )
   jobs:
   - job: DockerJob
     displayName: 'Build & Push Docker Hub'
@@ -155,7 +162,14 @@ stages:
 - stage: Deploy
   displayName: 'Deploy (docker-compose)'
   dependsOn: DockerBuild
-  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  condition: |
+    and(
+      succeeded(),
+      or(
+        eq(variables['Build.SourceBranch'], 'refs/heads/main'),
+        eq(variables['Build.Reason'], 'Manual')
+      )
+    )
   jobs:
   - deployment: DeployLocal
     displayName: 'docker-compose pull + up'

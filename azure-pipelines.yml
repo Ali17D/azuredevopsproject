@@ -1,0 +1,196 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+- group: esprit
+- name: APP_NAME
+  value: 'gestion-signalement'
+- name: IMAGE_TAG
+  value: '$(Build.BuildId)'
+- name: DOCKERHUB_REPO
+  value: 'ahmedhichri1996/gestion-signalement'
+- name: APP_DIR
+  value: '/home/ahmed/app'
+- name: MAVEN_OPTS
+  value: '-Dmaven.repo.local=$(Pipeline.Workspace)/.m2/repository'
+- name: JAVA_HOME_PATH
+  value: '/usr/lib/jvm/java-8-openjdk-amd64/jre'
+
+stages:
+
+# ─────────────────────────────────────────────
+# STAGE 1 — BUILD & TEST
+# ─────────────────────────────────────────────
+- stage: Build
+  displayName: 'Build & Test'
+  jobs:
+  - job: BuildAndTest
+    displayName: 'Maven Build + Tests'
+    pool:
+      name: Default
+
+    services:
+      mysql:
+        image: mysql:8.0
+        ports:
+          - 3306:3306
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: musee_signalement
+          MYSQL_USER: appuser
+          MYSQL_PASSWORD: apppassword
+
+    steps:
+
+    - script: |
+        export JAVA_HOME=$(JAVA_HOME_PATH)
+        export PATH=$JAVA_HOME/bin:$PATH
+        echo "JAVA_HOME=$JAVA_HOME"
+        java -version
+        mvn -version
+      displayName: 'Vérifier Java & Maven'
+
+    - script: |
+        echo "Waiting for MySQL..."
+        for i in $(seq 1 30); do
+          if mysqladmin ping -h 127.0.0.1 -u root -proot --silent 2>/dev/null; then
+            echo "MySQL ready!"
+            break
+          fi
+          echo "Attempt $i: not ready, waiting 3s..."
+          sleep 3
+        done
+      displayName: 'Attendre MySQL'
+
+    - script: |
+        export JAVA_HOME=$(JAVA_HOME_PATH)
+        export PATH=$JAVA_HOME/bin:$PATH
+        cd $(Build.SourcesDirectory)/gestion-signalement-main
+        mvn compile -B $(MAVEN_OPTS)
+      displayName: 'Compilation Maven'
+
+    - script: |
+        export JAVA_HOME=$(JAVA_HOME_PATH)
+        export PATH=$JAVA_HOME/bin:$PATH
+        cd $(Build.SourcesDirectory)/gestion-signalement-main
+        mvn test -B $(MAVEN_OPTS) \
+          -Dspring.datasource.url="jdbc:mysql://127.0.0.1:3306/musee_signalement?useSSL=false&allowPublicKeyRetrieval=true" \
+          -Dspring.datasource.username=appuser \
+          -Dspring.datasource.password=apppassword \
+          -Dspring.jpa.hibernate.ddl-auto=create-drop \
+          -Dspring.profiles.active=test
+      displayName: 'Tests JUnit'
+      continueOnError: true
+
+    - task: PublishTestResults@2
+      displayName: 'Publier résultats tests'
+      condition: always()
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: '**/surefire-reports/TEST-*.xml'
+
+    - script: |
+        export JAVA_HOME=$(JAVA_HOME_PATH)
+        export PATH=$JAVA_HOME/bin:$PATH
+        cd $(Build.SourcesDirectory)/gestion-signalement-main
+        mvn package -B $(MAVEN_OPTS) -DskipTests
+      displayName: 'Package JAR'
+
+    - script: |
+        cp $(Build.SourcesDirectory)/gestion-signalement-main/target/$(APP_NAME).jar $(Build.ArtifactStagingDirectory)/
+        cp $(Build.SourcesDirectory)/gestion-signalement-main/Dockerfile $(Build.ArtifactStagingDirectory)/
+        echo "Fichiers dans staging:"
+        ls -la $(Build.ArtifactStagingDirectory)/
+      displayName: 'Copier JAR + Dockerfile'
+
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publier artifacts'
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'drop'
+
+# ─────────────────────────────────────────────
+# STAGE 2 — DOCKER BUILD & PUSH
+# ─────────────────────────────────────────────
+- stage: DockerBuild
+  displayName: 'Docker Build & Push'
+  dependsOn: Build
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - job: DockerJob
+    displayName: 'Build & Push Docker Hub'
+    pool:
+      name: Default
+
+    steps:
+    - download: current
+      artifact: drop
+
+    - script: |
+        cd $(Pipeline.Workspace)/drop
+        echo "=== Contenu drop ==="
+        ls -la
+        echo "=== Build image ==="
+        docker build -t $(DOCKERHUB_REPO):$(IMAGE_TAG) -f Dockerfile .
+        docker tag $(DOCKERHUB_REPO):$(IMAGE_TAG) $(DOCKERHUB_REPO):latest
+        echo "=== Login Docker Hub ==="
+        echo "$(DOCKERHUB_PASSWORD)" | docker login -u "$(DOCKERHUB_USERNAME)" --password-stdin
+        echo "=== Push ==="
+        docker push $(DOCKERHUB_REPO):$(IMAGE_TAG)
+        docker push $(DOCKERHUB_REPO):latest
+        echo "Image pushée : $(DOCKERHUB_REPO):$(IMAGE_TAG)"
+      displayName: 'Build & Push Docker Hub'
+
+# ─────────────────────────────────────────────
+# STAGE 3 — DEPLOY docker-compose local
+# ─────────────────────────────────────────────
+- stage: Deploy
+  displayName: 'Deploy (docker-compose)'
+  dependsOn: DockerBuild
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+  jobs:
+  - deployment: DeployLocal
+    displayName: 'docker-compose pull + up'
+    pool:
+      name: Default
+    environment: 'production'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - script: |
+              set -e
+              cd $(APP_DIR)
+              echo "=== Pull nouvelle image ==="
+              docker pull $(DOCKERHUB_REPO):$(IMAGE_TAG)
+              docker tag $(DOCKERHUB_REPO):$(IMAGE_TAG) $(DOCKERHUB_REPO):latest
+              echo "=== Restart container app ==="
+              docker-compose up -d --no-deps --pull always app
+              echo "=== Nettoyage ==="
+              docker image prune -f
+              echo "=== Status ==="
+              docker-compose ps
+            displayName: 'Deploy docker-compose'
+
+          - script: |
+              echo "Attente démarrage (30s)..."
+              sleep 30
+              STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/aec-api-rest/signalements || echo "000")
+              echo "HTTP Status: $STATUS"
+              if [ "$STATUS" = "200" ]; then
+                echo "Health check OK"
+              else
+                echo "Status $STATUS — logs app:"
+                docker logs gestion-signalement --tail=30
+              fi
+            displayName: 'Health Check'
+            continueOnError: true

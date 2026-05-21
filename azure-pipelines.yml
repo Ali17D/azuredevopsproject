@@ -16,9 +16,9 @@ variables:
 - name: IMAGE_TAG
   value: '$(Build.BuildId)'
 - name: DOCKERHUB_REPO
-  value: 'ahmedhichri1996/gestion-signalement'
+  value: 'ali170600/gestion-signalement'
 - name: APP_DIR
-  value: '/home/ahmed/app'
+  value: '/home/ali/app'
 - name: MAVEN_OPTS
   value: '-Dmaven.repo.local=$(Pipeline.Workspace)/.m2/repository'
 - name: JAVA_HOME_PATH
